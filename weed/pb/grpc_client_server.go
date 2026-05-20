@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/seaweedfs/seaweedfs/weed/util/request_id"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/metadata"
 
 	"github.com/seaweedfs/seaweedfs/weed/glog"
@@ -37,6 +38,10 @@ const (
 	GrpcKeepAliveTime        = 60 * time.Second // ping interval when no activity
 	GrpcKeepAliveTimeout     = 20 * time.Second // ping timeout
 	GrpcKeepAliveMinimumTime = 20 * time.Second // minimum interval between client pings (enforcement)
+
+	GrpcDialTimeout     = 30 * time.Second       // Max timeout for connection
+	GrpcBackoffDelay    = 100 * time.Millisecond // Initial delay before retry
+	GrpcBackoffMaxDelay = 30 * time.Second       // Max delay before retry
 )
 
 var (
@@ -166,6 +171,15 @@ func GrpcDial(ctx context.Context, address string, waitForReady bool, opts ...gr
 	}
 
 	options = append(options,
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff: backoff.Config{
+				BaseDelay:  GrpcBackoffDelay,
+				MaxDelay:   GrpcBackoffMaxDelay,
+				Multiplier: 1.6,
+				Jitter: 0.2,
+			},
+			MinConnectTimeout: GrpcDialTimeout,
+		}),
 		grpc.WithDefaultCallOptions(
 			grpc.MaxCallSendMsgSize(Max_Message_Size),
 			grpc.MaxCallRecvMsgSize(Max_Message_Size),
