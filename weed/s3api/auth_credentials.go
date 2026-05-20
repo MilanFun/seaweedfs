@@ -1042,18 +1042,22 @@ func (iam *IdentityAccessManagement) UpsertIdentity(ident *iam_pb.Identity) erro
 
 // isEnabled reports whether S3 auth should be enforced for this server.
 //
-// Auth is considered enabled if either:
-//   - we have any locally managed identities/credentials (iam.isAuthEnabled), or
-//   - an external IAM integration has been configured (iam.iamIntegration != nil).
+// Driven solely by isAuthEnabled, which is set when:
+//   - any locally managed identities/credentials are loaded (file/filer/env), or
+//   - the operator passes -s3.iam.config, which triggers EnableAuthEnforcement
+//     at startup time even before any identities sync in.
 //
-// The iamIntegration check is intentionally included so that when an external
-// IAM provider is configured (and the server relies solely on it), auth is
-// still treated as enabled even if there are no local identities yet or
-// before any sync logic flips isAuthEnabled to true. Removing this check or
-// relying only on isAuthEnabled would change when auth is enforced and could
-// unintentionally allow unauthenticated access in integration-only setups.
+// Earlier versions also treated `iam.iamIntegration != nil` as a signal to
+// enforce auth, on the assumption that a non-nil integration implied an
+// explicitly configured external IAM provider. That assumption broke once
+// EnableIam (mini's default) started initialising the integration with empty
+// defaults so the embedded IAM API and OIDC-subscribe paths have somewhere
+// to plug in. With no signing key and no identities, that path still forced
+// auth on and rejected every anonymous request to `docker run seaweedfs`
+// (#9557). The fix is to keep the integration available without flipping
+// enforcement; explicit setups call EnableAuthEnforcement themselves.
 func (iam *IdentityAccessManagement) isEnabled() bool {
-	return iam.isAuthEnabled || iam.iamIntegration != nil
+	return iam.isAuthEnabled
 }
 
 func (iam *IdentityAccessManagement) updateAuthenticationState(identitiesCount int) bool {
@@ -1667,8 +1671,16 @@ type inlinePolicyLoader interface {
 	LoadInlinePolicies(ctx context.Context) (map[string]map[string]policy_engine.PolicyDocument, error)
 }
 
+type groupInlinePolicyLoader interface {
+	LoadGroupInlinePolicies(ctx context.Context) (map[string]map[string]policy_engine.PolicyDocument, error)
+}
+
 func inlinePolicyRuntimeName(userName, policyName string) string {
 	return "__inline_policy__/" + userName + "/" + policyName
+}
+
+func inlineGroupPolicyRuntimeName(groupName, policyName string) string {
+	return "__inline_group_policy__/" + groupName + "/" + policyName
 }
 
 func mergePoliciesIntoConfiguration(config *iam_pb.S3ApiConfiguration, policies []*iam_pb.Policy) {
@@ -1755,44 +1767,73 @@ func (iam *IdentityAccessManagement) hydrateRuntimePolicies(ctx context.Context,
 		return nil
 	}
 
-	inlineLoader, ok := store.(inlinePolicyLoader)
-	if !ok {
-		return nil
-	}
-
-	inlinePoliciesByUser, err := inlineLoader.LoadInlinePolicies(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to load inline policies for runtime: %w", err)
-	}
-
-	if len(inlinePoliciesByUser) == 0 {
-		return nil
-	}
-
-	identityByName := make(map[string]*iam_pb.Identity, len(config.Identities))
-	for _, identity := range config.Identities {
-		identityByName[identity.Name] = identity
-	}
-
 	inlinePolicies := make([]*iam_pb.Policy, 0)
-	for userName, userPolicies := range inlinePoliciesByUser {
-		identity, found := identityByName[userName]
-		if !found {
-			continue
-		}
 
-		for policyName, policyDocument := range userPolicies {
-			content, err := json.Marshal(policyDocument)
-			if err != nil {
-				return fmt.Errorf("failed to marshal inline policy %q for user %q: %w", policyName, userName, err)
+	if inlineLoader, ok := store.(inlinePolicyLoader); ok {
+		inlinePoliciesByUser, err := inlineLoader.LoadInlinePolicies(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to load inline policies for runtime: %w", err)
+		}
+		if len(inlinePoliciesByUser) > 0 {
+			identityByName := make(map[string]*iam_pb.Identity, len(config.Identities))
+			for _, identity := range config.Identities {
+				identityByName[identity.Name] = identity
 			}
 
-			runtimePolicyName := inlinePolicyRuntimeName(userName, policyName)
-			inlinePolicies = append(inlinePolicies, &iam_pb.Policy{
-				Name:    runtimePolicyName,
-				Content: string(content),
-			})
-			identity.PolicyNames = appendUniquePolicyName(identity.PolicyNames, runtimePolicyName)
+			for userName, userPolicies := range inlinePoliciesByUser {
+				identity, found := identityByName[userName]
+				if !found {
+					continue
+				}
+
+				for policyName, policyDocument := range userPolicies {
+					content, err := json.Marshal(policyDocument)
+					if err != nil {
+						return fmt.Errorf("failed to marshal inline policy %q for user %q: %w", policyName, userName, err)
+					}
+
+					runtimePolicyName := inlinePolicyRuntimeName(userName, policyName)
+					inlinePolicies = append(inlinePolicies, &iam_pb.Policy{
+						Name:    runtimePolicyName,
+						Content: string(content),
+					})
+					identity.PolicyNames = appendUniquePolicyName(identity.PolicyNames, runtimePolicyName)
+				}
+			}
+		}
+	}
+
+	if groupLoader, ok := store.(groupInlinePolicyLoader); ok {
+		groupPoliciesByName, err := groupLoader.LoadGroupInlinePolicies(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to load group inline policies for runtime: %w", err)
+		}
+		if len(groupPoliciesByName) > 0 {
+			groupByName := make(map[string]*iam_pb.Group, len(config.Groups))
+			for _, group := range config.Groups {
+				groupByName[group.Name] = group
+			}
+
+			for groupName, groupPolicies := range groupPoliciesByName {
+				group, found := groupByName[groupName]
+				if !found {
+					continue
+				}
+
+				for policyName, policyDocument := range groupPolicies {
+					content, err := json.Marshal(policyDocument)
+					if err != nil {
+						return fmt.Errorf("failed to marshal inline policy %q for group %q: %w", policyName, groupName, err)
+					}
+
+					runtimePolicyName := inlineGroupPolicyRuntimeName(groupName, policyName)
+					inlinePolicies = append(inlinePolicies, &iam_pb.Policy{
+						Name:    runtimePolicyName,
+						Content: string(content),
+					})
+					group.PolicyNames = appendUniquePolicyName(group.PolicyNames, runtimePolicyName)
+				}
+			}
 		}
 	}
 
@@ -1954,15 +1995,34 @@ func (iam *IdentityAccessManagement) initializeKMSFromJSON(configContent []byte)
 	return kms.LoadKMSFromConfig(kmsVal)
 }
 
-// SetIAMIntegration sets the IAM integration for advanced authentication and authorization
+// SetIAMIntegration sets the IAM integration for advanced authentication and authorization.
+//
+// This does NOT flip isAuthEnabled on its own. The advanced IAM machinery is
+// initialised unconditionally when EnableIam is set (mini's default), even
+// without an IAM config file, so that the embedded IAM API and OIDC-provider
+// subscribe paths have somewhere to plug in. In that mode there are no roles,
+// providers or identities yet, so the legacy "no credentials = allow all"
+// startup behavior must be preserved — otherwise `docker run seaweedfs` (which
+// starts `weed mini` with no config) rejects every anonymous request.
+//
+// Callers that genuinely require authentication enforcement — an explicit
+// -s3.iam.config file, or identities loaded from file/filer/env — flip
+// isAuthEnabled themselves via EnableAuthEnforcement / updateAuthenticationState.
 func (iam *IdentityAccessManagement) SetIAMIntegration(integration *S3IAMIntegration) {
 	iam.m.Lock()
 	defer iam.m.Unlock()
 	iam.iamIntegration = integration
-	// When IAM integration is configured, authentication must be enabled
-	// to ensure requests go through proper auth checks
-	if integration != nil {
+}
+
+// EnableAuthEnforcement turns on the auth-required mode unconditionally. Use
+// from setup paths that have evidence the operator intends to enforce auth
+// (explicit -s3.iam.config file, etc.) even before any identities are loaded.
+func (iam *IdentityAccessManagement) EnableAuthEnforcement() {
+	iam.m.Lock()
+	defer iam.m.Unlock()
+	if !iam.isAuthEnabled {
 		iam.isAuthEnabled = true
+		hasAnyIdentity.Store(true)
 	}
 }
 

@@ -317,8 +317,16 @@ func NewS3ApiServerWithStore(router *mux.Router, option *S3ApiServerOption, expl
 			// Set IAM integration in server
 			s3ApiServer.iamIntegration = s3iam
 
-			// Set the integration in the traditional IAM for compatibility
+			// Set the integration in the traditional IAM for compatibility.
+			// SetIAMIntegration no longer auto-enables auth — see the function comment.
+			// Only force isAuthEnabled when the operator actually pointed us at an
+			// IAM config file. Without one, EnableIam is the implicit mini default
+			// and we must keep the "no credentials = allow all" startup behavior so
+			// `docker run seaweedfs` works out of the box (fixes #9557).
 			iam.SetIAMIntegration(s3iam)
+			if option.IamConfig != "" {
+				iam.EnableAuthEnforcement()
+			}
 
 			// Initialize STS HTTP handlers for AssumeRoleWithWebIdentity endpoint
 			if stsService := iamManager.GetSTSService(); stsService != nil {
@@ -809,6 +817,16 @@ func (s3a *S3ApiServer) registerRouter(router *mux.Router) {
 
 		// GetBucketRequestPayment
 		bucket.Methods(http.MethodGet).HandlerFunc(track(s3a.iam.Auth(s3a.cb.Limit(s3a.GetBucketRequestPaymentHandler, ACTION_READ)), "GET")).Queries("requestPayment", "")
+		// PutBucketRequestPayment
+		bucket.Methods(http.MethodPut).HandlerFunc(track(s3a.iam.Auth(s3a.cb.Limit(s3a.PutBucketRequestPaymentHandler, ACTION_ADMIN)), "PUT")).Queries("requestPayment", "")
+
+		// Static bucket configuration endpoints for AWS-SDK compatibility
+		// GetBucketPolicyStatus
+		bucket.Methods(http.MethodGet).HandlerFunc(track(s3a.iam.Auth(s3a.cb.Limit(s3a.GetBucketPolicyStatusHandler, ACTION_READ)), "GET")).Queries("policyStatus", "")
+		// GetBucketAccelerateConfiguration
+		bucket.Methods(http.MethodGet).HandlerFunc(track(s3a.iam.Auth(s3a.cb.Limit(s3a.GetBucketAccelerateConfigurationHandler, ACTION_READ)), "GET")).Queries("accelerate", "")
+		// GetBucketLogging
+		bucket.Methods(http.MethodGet).HandlerFunc(track(s3a.iam.Auth(s3a.cb.Limit(s3a.GetBucketLoggingHandler, ACTION_READ)), "GET")).Queries("logging", "")
 
 		// GetBucketVersioning
 		bucket.Methods(http.MethodGet).HandlerFunc(track(s3a.iam.Auth(s3a.cb.Limit(s3a.GetBucketVersioningHandler, ACTION_READ)), "GET")).Queries("versioning", "")
@@ -832,6 +850,16 @@ func (s3a *S3ApiServer) registerRouter(router *mux.Router) {
 		bucket.Methods(http.MethodGet).HandlerFunc(track(s3a.iam.Auth(s3a.cb.Limit(s3a.GetPublicAccessBlockHandler, ACTION_ADMIN)), "GET")).Queries("publicAccessBlock", "")
 		bucket.Methods(http.MethodPut).HandlerFunc(track(s3a.iam.Auth(s3a.cb.Limit(s3a.PutPublicAccessBlockHandler, ACTION_ADMIN)), "PUT")).Queries("publicAccessBlock", "")
 		bucket.Methods(http.MethodDelete).HandlerFunc(track(s3a.iam.Auth(s3a.cb.Limit(s3a.DeletePublicAccessBlockHandler, ACTION_ADMIN)), "DELETE")).Queries("publicAccessBlock", "")
+
+		// Empty bucket configuration stubs for AWS-SDK compatibility (analytics, inventory, intelligent-tiering, metrics)
+		bucket.Methods(http.MethodGet).HandlerFunc(track(s3a.iam.Auth(s3a.cb.Limit(s3a.GetAnalyticsConfiguration, ACTION_READ)), "GET")).Queries("analytics", "", "id", "{id:.*}")
+		bucket.Methods(http.MethodGet).HandlerFunc(track(s3a.iam.Auth(s3a.cb.Limit(s3a.ListBucketAnalyticsConfigurations, ACTION_READ)), "GET")).Queries("analytics", "")
+		bucket.Methods(http.MethodGet).HandlerFunc(track(s3a.iam.Auth(s3a.cb.Limit(s3a.GetInventoryConfiguration, ACTION_READ)), "GET")).Queries("inventory", "", "id", "{id:.*}")
+		bucket.Methods(http.MethodGet).HandlerFunc(track(s3a.iam.Auth(s3a.cb.Limit(s3a.ListBucketInventoryConfigurations, ACTION_READ)), "GET")).Queries("inventory", "")
+		bucket.Methods(http.MethodGet).HandlerFunc(track(s3a.iam.Auth(s3a.cb.Limit(s3a.GetIntelligentTieringConfiguration, ACTION_READ)), "GET")).Queries("intelligent-tiering", "", "id", "{id:.*}")
+		bucket.Methods(http.MethodGet).HandlerFunc(track(s3a.iam.Auth(s3a.cb.Limit(s3a.ListBucketIntelligentTieringConfigurations, ACTION_READ)), "GET")).Queries("intelligent-tiering", "")
+		bucket.Methods(http.MethodGet).HandlerFunc(track(s3a.iam.Auth(s3a.cb.Limit(s3a.GetMetricsConfiguration, ACTION_READ)), "GET")).Queries("metrics", "", "id", "{id:.*}")
+		bucket.Methods(http.MethodGet).HandlerFunc(track(s3a.iam.Auth(s3a.cb.Limit(s3a.ListBucketMetricsConfigurations, ACTION_READ)), "GET")).Queries("metrics", "")
 
 		// ListObjectsV2
 		bucket.Methods(http.MethodGet).HandlerFunc(track(s3a.AuthWithPublicRead(func(w http.ResponseWriter, r *http.Request) {
