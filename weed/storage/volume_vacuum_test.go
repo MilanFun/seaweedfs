@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweedfs/weed/stats"
 	"github.com/seaweedfs/seaweedfs/weed/storage/idx"
 	"github.com/seaweedfs/seaweedfs/weed/storage/needle"
 	"github.com/seaweedfs/seaweedfs/weed/storage/super_block"
@@ -153,7 +154,7 @@ func testCompactionByIndex(t *testing.T, needleMapKind NeedleMapKind) {
 
 func TestCompactVolumeFilesOffline(t *testing.T) {
 	dir := t.TempDir()
-	location := NewDiskLocation(dir, 10, util.MinFreeSpace{}, dir, "", nil)
+	location := NewDiskLocation(dir, 10, util.MinFreeSpace{}, dir, "", nil, stats.DefaultDiskIOProbeConfig())
 	defer location.Close()
 
 	v, err := NewVolume(dir, dir, "", 1, NeedleMapInMemory, &super_block.ReplicaPlacement{}, &needle.TTL{}, 0, needle.GetCurrentVersion(), 0, 0)
@@ -188,7 +189,7 @@ func TestCompactVolumeFilesOffline(t *testing.T) {
 
 func TestCleanupCompactRemovesTempFiles(t *testing.T) {
 	dir := t.TempDir()
-	location := NewDiskLocation(dir, 10, util.MinFreeSpace{}, dir, "", nil)
+	location := NewDiskLocation(dir, 10, util.MinFreeSpace{}, dir, "", nil, stats.DefaultDiskIOProbeConfig())
 	defer location.Close()
 
 	v, err := NewVolume(dir, dir, "", 1, NeedleMapInMemory, &super_block.ReplicaPlacement{}, &needle.TTL{}, 0, needle.GetCurrentVersion(), 0, 0)
