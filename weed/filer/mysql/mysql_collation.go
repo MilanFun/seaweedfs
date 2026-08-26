@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"database/sql"
+	"os"
 	"strings"
 
 	"github.com/seaweedfs/seaweedfs/weed/filer/abstract_sql"
@@ -12,6 +13,10 @@ import (
 // the live filemeta.name collation is not binary, so S3 ListObjectsV2 stays
 // lexicographic. The fallback costs a filesort, so warn the operator to fix it.
 func ConfigureListOrdering(db *sql.DB, gen *SqlGenMysql) {
+	if os.Getenv("WEED_MYSQL_SKIP_COLLATION_CHECK") != "" {
+		glog.Warningf("mysql: filemeta.name collation check skipped via WEED_MYSQL_SKIP_COLLATION_CHECK; S3 list order follows the column collation and may not be byte-lexicographic")
+		return
+	}
 	collation, isBinary, err := nameColumnCollation(db)
 	if err != nil {
 		glog.V(1).Infof("mysql: skip filemeta.name collation check: %v", err)
